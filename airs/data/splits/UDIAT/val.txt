@@ -1,0 +1,16 @@
+/home/yh657/DATA/UDIAT/Benign/000084.png
+/home/yh657/DATA/UDIAT/Benign/000127.png
+/home/yh657/DATA/UDIAT/Benign/000128.png
+/home/yh657/DATA/UDIAT/Benign/000065.png
+/home/yh657/DATA/UDIAT/Malignant/000146.png
+/home/yh657/DATA/UDIAT/Malignant/000057.png
+/home/yh657/DATA/UDIAT/Benign/000111.png
+/home/yh657/DATA/UDIAT/Benign/000012.png
+/home/yh657/DATA/UDIAT/Malignant/000138.png
+/home/yh657/DATA/UDIAT/Benign/000089.png
+/home/yh657/DATA/UDIAT/Benign/000040.png
+/home/yh657/DATA/UDIAT/Malignant/000048.png
+/home/yh657/DATA/UDIAT/Malignant/000302.png
+/home/yh657/DATA/UDIAT/Benign/000020.png
+/home/yh657/DATA/UDIAT/Malignant/000053.png
+/home/yh657/DATA/UDIAT/Malignant/000045.png
