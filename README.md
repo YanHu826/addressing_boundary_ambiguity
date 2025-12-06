@@ -485,8 +485,22 @@ This project is licensed under the [LICENSE](LICENSE) file.
 
 ## Acknowledgments
 
-- Thanks to all dataset providers
-- Thanks to the PyTorch community for support
+We would like to express our sincere gratitude to:
+
+- **Dataset Providers**: We thank the creators and maintainers of the BUSI, TN3K, PSFHS, and HC18 datasets for making their data publicly available, which enabled this research.
+
+- **Open Source Community**: 
+  - PyTorch team for providing an excellent deep learning framework
+  - The open-source community for various tools and libraries that made this work possible
+
+- **Related Work**: We acknowledge the contributions of previous works in semi-supervised learning and medical image segmentation, particularly:
+  - Shape Prior framework for shape-aware semi-supervised segmentation
+  - Coordinate Attention mechanism
+  - Various semi-supervised learning methods that inspired our approach
+
+- **Institutional Support**: We thank the University of Exeter for providing computational resources and support for this research.
+
+- **Reviewers and Contributors**: We appreciate the valuable feedback from reviewers and the research community that helped improve this work.
 
 ## Contact
 
