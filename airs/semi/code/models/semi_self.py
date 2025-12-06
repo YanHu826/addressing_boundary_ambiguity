@@ -1,3 +1,13 @@
+"""
+半监督分割模型主网络（SCRA框架）
+论文：Addressing Boundary Ambiguity in Semi-Supervised Ultrasound Segmentation 
+      via Structure-Consistent Representation Alignment
+
+该模块实现了SCRA框架的核心架构，包括：
+1. Coordinate Attention (CA) - 坐标注意力增强的编码器（第3.3节）
+2. Structure-Oriented Regularization (SOR) - 结构导向正则化（第3.5节）
+3. 双解码器架构：分割解码器和辅助解码器
+"""
 # semi_self.py
 import torch
 import torch.nn as nn
@@ -99,43 +109,62 @@ class Encoder(nn.Module):
 
 
 class MyModel(nn.Module):
+    """
+    SCRA主网络模型（论文第3.1节）
+    
+    架构组成：
+    - 编码器：ResNet-34骨干网络，提取多尺度特征
+    - CA模块：在skip connections中嵌入坐标注意力（第3.3节）
+    - 分割解码器：主分割路径，输出最终分割结果
+    - 辅助解码器：用于SOR的结构扰动路径（第3.5节）
+    """
     def __init__(self, args, num_classes=1, in_ch=3):
         super().__init__()
         self.no_ca = args.no_ca
         self.no_sor = args.no_sor
         self.no_scd = args.no_scd
-        # Encoder
+        
+        # ========== 编码器：ResNet-34骨干网络 ==========
         self.encoder = Encoder(in_ch)
-        # CoordAttention
+        
+        # ========== 坐标注意力模块（CA）- 论文第3.3节 ==========
+        # CA模块嵌入在skip connections中，增强空间定位能力
+        # 论文描述：CA模块在每个残差块后嵌入，实现多尺度边界增强
         if self.no_ca:
             self.attention4 = nn.Identity()
             self.attention3 = nn.Identity()
             self.attention2 = nn.Identity()
             self.attention1 = nn.Identity()
         else:
-            self.attention4 = CoordAttention(256)
-            self.attention3 = CoordAttention(128)
-            self.attention2 = CoordAttention(64)
-            self.attention1 = CoordAttention(64)
-        # Segmentation decoder
+            # 不同层级的特征通道数：layer4(256), layer3(128), layer2(64), layer1(64)
+            self.attention4 = CoordAttention(256)  # e4层特征增强
+            self.attention3 = CoordAttention(128)   # e3层特征增强
+            self.attention2 = CoordAttention(64)    # e2层特征增强
+            self.attention1 = CoordAttention(64)     # e1层特征增强
+        # ========== 分割解码器：主分割路径 ==========
+        # U-Net风格的解码器，通过skip connections融合多尺度特征
         self.seg5 = DecoderBlock(512, 512)
-        self.seg4 = DecoderBlock(512 + 256, 256)
-        self.seg3 = DecoderBlock(256 + 128, 128)
-        self.seg2 = DecoderBlock(128 + 64, 64)
-        self.seg1 = DecoderBlock(64 + 64, 64)
+        self.seg4 = DecoderBlock(512 + 256, 256)  # 融合e4层特征
+        self.seg3 = DecoderBlock(256 + 128, 128)   # 融合e3层特征
+        self.seg2 = DecoderBlock(128 + 64, 64)     # 融合e2层特征
+        self.seg1 = DecoderBlock(64 + 64, 64)      # 融合e1层特征
         self.seg_out = nn.Sequential(ConvBlock(64, 32), nn.Dropout2d(0.1), nn.Conv2d(32, num_classes, 1))
-        # Inpainting decoder (unchanged)
+        
+        # ========== 辅助解码器：用于SOR的结构扰动路径（论文第3.5节） ==========
+        # 该解码器用于生成结构扰动视图，实现结构一致性正则化
         self.inp5 = DecoderBlock(512, 512, transpose=True)
         self.inp4 = DecoderBlock(512 + 256, 256, transpose=True)
         self.inp3 = DecoderBlock(256 + 128, 128, transpose=True)
         self.inp2 = DecoderBlock(128 + 64, 64, transpose=True)
         self.inp1 = DecoderBlock(64 + 64, 64, transpose=True)
+        # 多尺度侧输出：用于深度监督
         self.side5 = SideoutBlock(512, 1)
         self.side4 = SideoutBlock(256, 1)
         self.side3 = SideoutBlock(128, 1)
         self.side2 = SideoutBlock(64, 1)
         self.inp_out = nn.Sequential(ConvBlock(64, 32), nn.Dropout2d(0.1), nn.Conv2d(32, num_classes, 1))
-        # Optional feature-drop decoder
+        
+        # ========== 上下文块：e5层特征增强 ==========
         if args.no_ca:
             self.context_block = nn.Sequential(
                 nn.Conv2d(512, 512, kernel_size=3, padding=1),
@@ -143,15 +172,20 @@ class MyModel(nn.Module):
                 nn.ReLU(inplace=True)
             )
         else:
+            # 在e5层也应用CA增强（论文第3.3节）
             self.context_block = nn.Sequential(
                 nn.Conv2d(512, 512, kernel_size=3, padding=1),
                 nn.BatchNorm2d(512),
                 nn.ReLU(inplace=True),
                 CoordAttention(512)
             )
+        
+        # ========== SOR解码器：结构导向正则化模块（论文第3.5节） ==========
+        # SOR通过guided cutout对编码器特征进行结构扰动
         if self.no_sor:
             self.sor_decoder = nn.Identity()
         else:
+            # erase=0.4表示擦除40%的区域，用于生成结构扰动视图
             self.sor_decoder = SORDecoder(erase=0.4)
 
         self.boundary_out = nn.Sequential(
@@ -162,53 +196,58 @@ class MyModel(nn.Module):
         )
 
     def forward(self, x):
-        # ------------------------
-        # 1. Encoding
-        # ------------------------
-        e1, e2, e3, e4, e5 = self.encoder(x)
-        s5 = self.context_block(e5)
+        """
+        前向传播
+        
+        返回:
+            mask: 主分割解码器的输出（最终分割结果）
+            preboud: 辅助解码器的输出（用于SOR）
+            out2-out5: 辅助解码器的多尺度侧输出
+            mask_binary: 二值化掩码
+            boundary_pred: 边界预测
+            e5: 编码器最深层的特征（用于SCD的特征F_u）
+        """
+        # ========== 1. 编码阶段：提取多尺度特征 ==========
+        e1, e2, e3, e4, e5 = self.encoder(x)  # ResNet-34提取的特征
+        s5 = self.context_block(e5)  # e5层特征增强（包含CA）
 
-        # ------------------------
-        # 2. Segmentation Decoder with Attention Gates
-        # ------------------------
+        # ========== 2. 分割解码器：主分割路径（论文第3.1节） ==========
+        # 通过skip connections融合CA增强的特征
         d5 = self.seg5(s5)
 
-        # Level 4
-        f4_att = self.attention4(e4)
+        # Level 4: 融合CA增强的e4特征
+        f4_att = self.attention4(e4)  # CA增强（论文第3.3节）
         d4 = self.seg4(cat(d5, f4_att))
 
-        # Level 3
+        # Level 3: 融合CA增强的e3特征
         f3_att = self.attention3(e3)
         d3 = self.seg3(cat(d4, f3_att))
 
-        # Level 2
+        # Level 2: 融合CA增强的e2特征
         f2_att = self.attention2(e2)
         d2 = self.seg2(cat(d3, f2_att))
 
-        # Level 1
+        # Level 1: 融合CA增强的e1特征
         f1_att = self.attention1(e1)
         d1 = self.seg1(cat(d2, f1_att))
 
-        # d5 = self.seg5(e5)
-        # d4 = self.seg4(cat(d5, e4))
-        # d3 = self.seg3(cat(d4, e3))
-        # d2 = self.seg2(cat(d3, e2))
-        # d1 = self.seg1(cat(d2, e1))
-
+        # 最终分割输出
         mask = torch.sigmoid(self.seg_out(d1))
         mask_binary = (mask > 0.5).float()
         boundary_pred = self.boundary_out(d1)
 
-        # ------------------------
-        # 3. Inpainting Decoder (unchanged)
-        # ------------------------
+        # ========== 3. 辅助解码器：SOR结构扰动路径（论文第3.5节） ==========
+        # SOR通过guided cutout对编码器特征进行结构扰动，生成扰动视图
         if self.no_sor:
-            feature = e5
+            feature = e5  # 不使用SOR时，直接使用原始特征
         else:
+            # SOR解码器：对e5特征进行结构扰动（论文第3.5节）
+            # 输入：e5特征和mask_binary，输出：扰动后的特征
             feature = self.sor_decoder(e5, mask_binary)
 
+        # 辅助解码器的前向传播（生成扰动视图的预测）
         i5 = self.inp5(feature)
-        out5 = torch.sigmoid(self.side5(i5))
+        out5 = torch.sigmoid(self.side5(i5))  # 多尺度侧输出
         i4 = self.inp4(cat(i5, e4))
         out4 = torch.sigmoid(self.side4(i4))
         i3 = self.inp3(cat(i4, e3))
@@ -216,6 +255,7 @@ class MyModel(nn.Module):
         i2 = self.inp2(cat(i3, e2))
         out2 = torch.sigmoid(self.side2(i2))
         i1 = self.inp1(cat(i2, e1))
-        preboud = torch.sigmoid(self.inp_out(i1))
+        preboud = torch.sigmoid(self.inp_out(i1))  # 辅助解码器的主输出
         
-        return mask, preboud, out2, out3, out4, out5, mask_binary, boundary_pred
+        # 返回所有输出，包括编码器特征e5（用于SCD的特征F_u，论文第3.2节）
+        return mask, preboud, out2, out3, out4, out5, mask_binary, boundary_pred, e5

@@ -14,7 +14,7 @@ from models.build_model import build_model
 from models.dc_gan import DCGAN_D
 from utils.evaluate import evaluate
 from opt import args
-from utils.loss import BceDiceLoss, sigmoid_rampup, SemanticContrastiveLoss, dynamic_edge_loss
+from utils.loss import BceDiceLoss, sigmoid_rampup, SemanticContrastiveLoss, dynamic_edge_loss, get_boundary_sobel
 import math
 import warnings
 from utils.loss import edge_loss
@@ -29,12 +29,11 @@ def DeepSupSeg(pred, gt):
 
 
 def get_boundary_map(mask_batch):
-    boundary_batch = []
-    for mask in mask_batch:
-        mask_np = mask.squeeze().cpu().numpy().astype(np.uint8)
-        edge = cv2.Canny(mask_np * 255, 100, 200) / 255.0
-        boundary_batch.append(torch.from_numpy(edge).unsqueeze(0))
-    return torch.stack(boundary_batch).float().to(mask_batch.device)
+    """
+    Extract boundary map using Sobel operator as described in the paper.
+    This replaces Canny edge detection to match the paper's methodology.
+    """
+    return get_boundary_sobel(mask_batch)
 
 
 def lr_poly(base_lr, iter, max_iter, power):
@@ -112,7 +111,30 @@ def train():
                 torch.save(model.state_dict(), args.root + "/semi/checkpoint/" + args.ckpt_name + "/third_best.pth")
 
 def train_semi():
-    """load data"""
+    """
+    SCRA框架的半监督训练函数
+    
+    训练流程概述（对应论文第3节）：
+    1. 数据加载：标注数据D_l和无标注数据D_u
+    2. 模型初始化：
+       - 主分割网络（包含CA增强的编码器和双解码器）
+       - SCD判别器（用于结构对比学习）
+    3. 每个训练迭代：
+       a) 标注数据：计算监督损失L_sup（BCE + Dice + 边界损失）
+       b) 无标注数据：
+          - 生成伪标签mask_boud
+          - SCD模块：计算对抗损失L_adv和特征匹配损失L_FM（第3.2节）
+          - SOR模块：计算结构一致性损失L_SOR（第3.5节）
+          - 其他辅助损失（边界损失、CPS损失等）
+       c) 总损失：L_total = L_sup + L_adv + L_FM + L_SOR + 其他（论文公式(19)）
+       d) 反向传播和参数更新
+    
+    关键模块：
+    - CA (Coordinate Attention): 第3.3节，增强空间定位
+    - SCD (Structure-Contrast Discriminator): 第3.2节，结构对比学习
+    - SOR (Structure-Oriented Regularization): 第3.5节，结构一致性正则化
+    """
+    # ========== 数据加载 ==========
     train_l_data, train_u_data, valid_data = build_dataset(args)
     train_l_dataloader = DataLoader(train_l_data, args.batch_size, shuffle=True, num_workers=args.num_workers)
     train_u_dataloader = DataLoader(train_u_data, args.batch_size, shuffle=True, num_workers=args.num_workers)
@@ -128,12 +150,35 @@ def train_semi():
     model_cps.load_state_dict(model.state_dict())
     model_cps.eval()  # No second model is trained; it is only used to generate pseudo-labels.
 
+    # ========== 初始化SCD判别器（论文第3.2节） ==========
     if not args.no_scd:
+        """
+        Structure-Contrast Discriminator (SCD) 初始化
+        论文第3.2节：使用DCGAN风格的判别器架构
+        
+        输入设计：
+        - 论文公式(8): Z = Concat(F_u, B)，其中F_u是512维特征，B是1维边界图
+        - 理论上输入通道数应为 512 + 1 = 513
+        - 为使用预训练权重，使用特征适配器将512维降维到3维
+        - 最终输入：3（特征）+ 1（边界）= 4通道，兼容预训练判别器
+        """
+        # 初始化判别器：DCGAN架构，输入4通道，输出64x64特征图
         netD = DCGAN_D(isize=64, nz=100, nc=4, ndf=64, ngpu=1)
         netD.cuda()
+        
+        # 特征适配器：将512维编码器特征降维到3维
+        # 用于将特征-边界拼接表示适配到预训练判别器的输入格式
+        feature_adapter = nn.Sequential(
+            nn.Conv2d(512, 3, kernel_size=1, bias=False),  # 1x1卷积降维
+            nn.BatchNorm2d(3),
+            nn.ReLU(inplace=True)
+        ).cuda()
+        
+        # 加载预训练的判别器权重（论文提到判别器需要预训练以稳定训练）
         netD_weight = torch.load("models/pretrain/GAN/netD_epoch_10000.pth")
         new_state_dict = {}
         for k, v in netD_weight.items():
+            # 适配输入通道数：从1通道改为4通道
             if k == "main.initial:1-64:conv.weight":
                 print(f"Rename key: {k} -> main.initial:4-64:conv.weight")
                 new_state_dict["main.initial:4-64:conv.weight"] = v
@@ -141,7 +186,13 @@ def train_semi():
                 new_state_dict[k] = v
 
         netD.load_state_dict(new_state_dict)
-        netD.eval()
+        netD.eval()  # 初始时设为评估模式
+        
+        # 特征适配器的优化器（需要单独优化）
+        optim_adapter = torch.optim.Adam(feature_adapter.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    else:
+        feature_adapter = None
+        optim_adapter = None
 
     optim = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -172,71 +223,109 @@ def train_semi():
                 img_l = img_l.cuda()
                 gt = gt.cuda()
                 img_u = img_u.cuda()
+            # ========== 前向传播：标注数据 ==========
             optim.zero_grad()
             pred_l = model(img_l)
-            mask = pred_l[0]
-            boundary_pred = pred_l[-1]  # Obtain boundary predictions from the model output
-            boundary_gt = get_boundary_map(gt)
+            # 模型输出：[mask, preboud, out2, out3, out4, out5, mask_binary, boundary_pred, e5]
+            mask = pred_l[0]  # 主分割输出
+            boundary_pred = pred_l[-2]  # 边界预测输出
+            
+            # 计算标注数据的监督损失（论文公式(20)）
+            boundary_gt = get_boundary_map(gt)  # 使用Sobel算子提取真实边界
             loss_boundary = F.binary_cross_entropy_with_logits(boundary_pred, boundary_gt)
-            loss_l_seg = DeepSupSeg(mask, gt)
-            loss_l = loss_l_seg + 0.2 * loss_boundary
+            loss_l_seg = DeepSupSeg(mask, gt)  # BCE + Dice损失
+            loss_l = loss_l_seg + 0.2 * loss_boundary  # 监督损失：分割损失 + 边界损失
+            
+            # ========== 前向传播：无标注数据 ==========
             pred_u = model(img_u)
-            _, predboud, sor_feat2, sor_feat3, sor_feat4, sor_feat5, mask_boud, _ = pred_u  # 来自 SOR decoder
+            # 解包输出：predboud是辅助解码器输出，feat_u是编码器特征e5（用于SCD）
+            _, predboud, sor_feat2, sor_feat3, sor_feat4, sor_feat5, mask_boud, _, feat_u = pred_u
+            # feat_u = e5：编码器最深层的特征（512维），用于SCD的特征F_u（论文第3.2节）
 
-            if not args.no_scd:
-                # print('未删除scd')
-                shape_u_1 = F.interpolate(predboud, size=(64, 64), mode='bilinear', align_corners=False)
-                shape_u_2 = F.interpolate(sor_feat2, size=(64, 64), mode='bilinear', align_corners=False)
-                shape_u_3 = F.interpolate(sor_feat3, size=(64, 64), mode='bilinear', align_corners=False)
-                shape_u_4 = F.interpolate(sor_feat4, size=(64, 64), mode='bilinear', align_corners=False)
-                shape_u_5 = F.interpolate(sor_feat5, size=(64, 64), mode='bilinear', align_corners=False)
-            # ---------------- Segmentation loss ----------------
+            # ========== 无标注数据的分割损失 ==========
+            # 使用伪标签（mask_boud）进行监督，但降低低置信度区域的权重
             with torch.no_grad():
-                prob_map = torch.sigmoid(predboud)  # soft prediction
+                prob_map = torch.sigmoid(predboud)  # 预测概率图
                 weights = torch.ones_like(prob_map)
-                weights[(prob_map >= 0.4) & (prob_map <= 0.6)] = 0.5  # Downweight the regions with low confidence
+                # 对低置信度区域（0.4-0.6）降低权重，避免噪声伪标签的影响
+                weights[(prob_map >= 0.4) & (prob_map <= 0.6)] = 0.5
 
+            # 加权分割损失：高置信度区域权重高，低置信度区域权重低
             loss_u_seg = (DeepSupSeg(predboud, mask_boud) * weights).mean()
 
-            # ---------------- Training of the discriminator D ----------------
+            # ========== 训练判别器D（SCD模块 - 论文第3.2节） ==========
             if not args.no_scd:
-                # print('未删除scd')
-                # Unify the spatial dimensions
-                shape_u_1_up = F.interpolate(shape_u_1, size=img_u.shape[2:], mode='bilinear', align_corners=False)
-
-                # Mosaic images and pseudo-label features
-                real_feat = torch.cat([img_u, shape_u_1_up.detach()], dim=1)
-                fake_feat = torch.cat([
-                    img_u,
-                    F.interpolate(sor_feat2.detach(), size=img_u.shape[2:], mode='bilinear', align_corners=False)
-                ], dim=1)
-                # Feature Matching Loss
-                _, real_features = netD(real_feat, return_features=True)
-                _, fake_features = netD(fake_feat, return_features=True)
+                """
+                Structure-Contrast Discriminator (SCD) - 结构对比判别器
+                论文第3.2节：通过对抗学习区分真实和伪结构边界
+                
+                核心思想：
+                1. 构建联合表示 Z = Concat(F_u, B)，其中：
+                   - F_u: 编码器深层特征（e5，512维）
+                   - B: 通过Sobel算子提取的边界图（论文公式(9)）
+                2. 判别器学习区分真实边界（来自标注数据）和伪边界（来自无标注预测）
+                3. 通过对抗训练，引导网络生成结构一致的预测
+                
+                论文公式(8): Z = Concat(F_u, B)
+                论文公式(10)-(11): 对抗损失
+                """
+                
+                # ========== 步骤1：提取边界图（论文公式(9)） ==========
+                # 使用Sobel算子从掩码中提取边界图
+                boundary_gt_l = get_boundary_sobel(gt)  # 真实边界：来自标注数据的ground truth
+                boundary_pseudo_u = get_boundary_sobel(mask_boud)  # 伪边界：来自无标注数据的预测
+                
+                # ========== 步骤2：获取编码器特征F_u ==========
+                # 对于标注数据：需要重新前向传播获取编码器特征
+                with torch.no_grad():
+                    _, _, _, _, _, _, _, _, feat_l = model(img_l)
+                
+                # 对于无标注数据：feat_u已经在前面获取（pred_u的最后一个输出）
+                
+                # ========== 步骤3：调整特征和边界图的空间尺寸 ==========
+                # 将特征图调整到与边界图相同的空间尺寸
+                feat_l_resized = F.interpolate(feat_l, size=boundary_gt_l.shape[2:], mode='bilinear', align_corners=False)
+                feat_u_resized = F.interpolate(feat_u, size=boundary_pseudo_u.shape[2:], mode='bilinear', align_corners=False)
+                
+                # ========== 步骤4：特征适配（兼容预训练判别器） ==========
+                # 将512维特征降维到3维，以便与边界图（1维）拼接成4通道输入
+                # 这样可以使用预训练的判别器权重
+                feat_l_adapted = feature_adapter(feat_l_resized.detach())
+                feat_u_adapted = feature_adapter(feat_u_resized.detach())
+                
+                # ========== 步骤5：构建联合特征-边界表示（论文公式(8)） ==========
+                # Z = Concat(F, B)
+                real_feat_boundary = torch.cat([feat_l_adapted, boundary_gt_l], dim=1)  # 真实：Z_gt = (F_l, B(y))
+                fake_feat_boundary = torch.cat([feat_u_adapted, boundary_pseudo_u], dim=1)  # 伪：Z_u = (F_u, B(P_u))
+                
+                # ========== 步骤6：计算特征匹配损失（论文公式(23)） ==========
+                # L_FM用于稳定对抗训练，确保生成器特征与真实特征在判别器中间层相似
+                # 论文描述：特征匹配损失使梯度传播更平滑
+                _, real_features = netD(real_feat_boundary, return_features=True)
+                _, fake_features = netD(fake_feat_boundary, return_features=True)
 
                 fm_loss = 0
+                # 计算判别器各层特征之间的L1距离
                 for rf, ff in zip(real_features, fake_features):
-                    fm_loss += F.l1_loss(ff, rf.detach())  # detach real to avoid backprop to D
-                fm_loss = fm_loss / len(real_features)  # The average loss of multiple feature layers
+                    fm_loss += F.l1_loss(ff, rf.detach())  # detach真实特征，避免反向传播到D
+                fm_loss = fm_loss / len(real_features)  # 多层特征的平均损失
+                # 论文权重：λ_FM = 1.0
 
+                # ========== 步骤7：训练判别器（论文公式(21)-(22)） ==========
                 criterion_GAN = nn.BCEWithLogitsLoss()
-                # Upsample shape_u_1 to the same spatial size as img_u
-                shape_u_1_up = F.interpolate(shape_u_1.detach(), size=img_u.shape[2:], mode='bilinear', align_corners=False)
-
-                # The spliced images and pseudo-label features are then sent back to the discriminator
-                real_pred = netD(torch.cat([img_u, shape_u_1_up], dim=1))
-                fake_pred = netD(torch.cat([
-                    img_u,
-                    F.interpolate(sor_feat2.detach(), size=img_u.shape[2:], mode='bilinear', align_corners=False)
-                ], dim=1))
+                
+                # 判别器前向传播：区分真实和伪边界
+                real_pred = netD(real_feat_boundary)  # 真实边界应该输出1
+                fake_pred = netD(fake_feat_boundary)  # 伪边界应该输出0
                 real_labels = torch.ones_like(real_pred)
                 fake_labels = torch.zeros_like(fake_pred)
 
-                errD_real = criterion_GAN(real_pred, real_labels)
-                errD_fake = criterion_GAN(fake_pred, fake_labels)
-                errD = (errD_real + errD_fake) * 0.5
+                # 计算判别器损失（论文公式(22)）
+                errD_real = criterion_GAN(real_pred, real_labels)  # 真实边界损失
+                errD_fake = criterion_GAN(fake_pred, fake_labels)  # 伪边界损失
+                errD = (errD_real + errD_fake) * 0.5  # 总判别器损失
 
-                # Update D
+                # 更新判别器参数（每2个epoch更新一次，稳定训练）
                 netD.train()
                 optimizer_D = torch.optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.999))
                 if epoch % 2 == 0:
@@ -247,48 +336,69 @@ def train_semi():
             # ---------------- edge loss ----------------
             if not args.no_scd:
                 loss_edge = edge_loss(predboud, mask_boud)
+            else:
+                loss_edge = torch.tensor(0.0, device=img_u.device)
 
-            # ---------------- Generator adversarial loss ----------------
+            # ========== 生成器对抗损失（SCD - 论文公式(21)） ==========
             if not args.no_scd:
-                pred_fake_for_G = netD(
-                    torch.cat([
-                        img_u,
-                        F.interpolate(sor_feat2, size=img_u.shape[2:], mode='bilinear', align_corners=False)
-                    ], dim=1)
-                )
-
+                """
+                生成器损失：引导网络生成结构一致的预测
+                论文公式(21): L_adv = E_{x_u}[-log(1 - D(Z_u))]
+                目标：使伪边界被判别器误判为真实边界（输出接近1）
+                """
+                # 提取无标注数据的边界图
+                boundary_pseudo_u = get_boundary_sobel(mask_boud)
+                
+                # 对于生成器：使用当前特征（不detach），允许梯度反向传播
+                feat_u_resized_G = F.interpolate(feat_u, size=boundary_pseudo_u.shape[2:], mode='bilinear', align_corners=False)
+                feat_u_adapted_G = feature_adapter(feat_u_resized_G)
+                fake_feat_boundary_G = torch.cat([feat_u_adapted_G, boundary_pseudo_u], dim=1)
+                
+                # 生成器希望判别器将伪边界判断为真实（输出接近1）
+                pred_fake_for_G = netD(fake_feat_boundary_G)
                 errG_adv = criterion_GAN(pred_fake_for_G, real_labels)
+                # 论文权重：λ_adv = 0.1
+            else:
+                errG_adv = torch.tensor(0.0, device=img_u.device)
+                fm_loss = torch.tensor(0.0, device=img_u.device)
 
-            # ---------------- Summary of Final Losses ----------------
+            # ========== SOR损失（结构导向正则化 - 论文第3.5节） ==========
+            if not args.no_sor:
+                """
+                Structure-Oriented Regularization (SOR) - 结构导向正则化
+                论文第3.5节：通过结构级一致性约束增强模型对边界模糊的鲁棒性
+                
+                核心思想：
+                1. 对解码器输出施加dropout扰动，生成扰动视图
+                2. 使用Sobel算子提取结构表示（边界图）
+                3. 最小化干净预测和扰动预测的结构表示差异
+                4. 确保模型在解码器扰动下仍能保持结构一致性
+                
+                论文公式(17): s = G(p), s_hat = G(p_hat)，其中G是Sobel算子
+                论文公式(18): L_SOR = λ_SOR * ||s - s_hat||_1
+                """
+                
+                # ========== 步骤1：对解码器输出施加扰动 ==========
+                decoder_output_clean = predboud  # 干净预测（无扰动）
+                decoder_output_perturbed = F.dropout2d(decoder_output_clean, p=0.1, training=True)  # 扰动预测
+                
+                # ========== 步骤2：提取结构表示（论文公式(17)） ==========
+                # 使用Sobel算子从预测中提取结构边界表示
+                # s = G(p)：干净预测的结构表示
+                struct_clean = get_boundary_sobel(torch.sigmoid(decoder_output_clean))
+                # s_hat = G(p_hat)：扰动预测的结构表示
+                struct_perturbed = get_boundary_sobel(torch.sigmoid(decoder_output_perturbed))
+                
+                # ========== 步骤3：计算结构一致性损失（论文公式(18)） ==========
+                # L_SOR = λ_SOR * ||s - s_hat||_1
+                # 最小化干净和扰动预测的结构差异，增强结构稳定性
+                loss_sor = 0.2 * F.l1_loss(struct_clean, struct_perturbed)
+                # 论文权重：λ_SOR = 0.2
+            else:
+                loss_sor = torch.tensor(0.0, device=img_u.device)
+
+            # ---------------- Additional losses (only when SCD is enabled) ----------------
             if not args.no_scd:
-                loss_u_shape = (
-                                       netD(torch.cat([
-                                           img_u,
-                                           F.interpolate(shape_u_1, size=img_u.shape[2:], mode='bilinear',
-                                                         align_corners=False)
-                                       ], dim=1)) +
-                                       netD(torch.cat([
-                                           img_u,
-                                           F.interpolate(shape_u_2, size=img_u.shape[2:], mode='bilinear',
-                                                         align_corners=False)
-                                       ], dim=1)) +
-                                       netD(torch.cat([
-                                           img_u,
-                                           F.interpolate(shape_u_3, size=img_u.shape[2:], mode='bilinear',
-                                                         align_corners=False)
-                                       ], dim=1)) +
-                                       netD(torch.cat([
-                                           img_u,
-                                           F.interpolate(shape_u_4, size=img_u.shape[2:], mode='bilinear',
-                                                         align_corners=False)
-                                       ], dim=1)) +
-                                       netD(torch.cat([
-                                           img_u,
-                                           F.interpolate(shape_u_5, size=img_u.shape[2:], mode='bilinear',
-                                                         align_corners=False)
-                                       ], dim=1))
-                               ) / 5
-
                 # ========== Semantic Contrastive Loss ==========
                 sor_feat4 = F.normalize(sor_feat4, p=2, dim=1)
                 feat4 = sor_feat4
@@ -355,22 +465,37 @@ def train_semi():
                 pred_u_main = predboud  # The output of your main model
                 loss_cps = (F.binary_cross_entropy_with_logits(pred_u_main, pseudo_u_cps, reduction='none') * uncertainty_weight.detach()).mean()
 
-                # Dynamic weight ramp-up
+                # ========== 总损失函数（论文第3.6节，公式(19)） ==========
+                """
+                论文公式(19): L_total = L_sup + λ_adv * L_adv + λ_FM * L_FM + λ_SOR * L_SOR
+                
+                损失组件：
+                - L_sup: 监督损失（BCE + Dice），用于标注数据
+                - L_adv: 对抗损失（SCD），权重λ_adv=0.1
+                - L_FM: 特征匹配损失（SCD），权重λ_FM=1.0
+                - L_SOR: 结构导向正则化损失，权重λ_SOR=0.2
+                """
                 cps_weight = sigmoid_rampup(epoch, rampup_length=10)
+                
+                # 无标注数据的损失组合
                 loss_u = (
-                        0.75 * loss_u_seg +
-                        0.1 * loss_u_shape +
-                        0.05 * loss_edge +
-                        0.1 * fm_loss +
-                        0.05 * errG_adv +
-                        cps_weight * loss_cps +
-                        0.05 * loss_scl +
-                        0.05 * loss_soft_pseudo
+                        0.75 * loss_u_seg +        # 无标注分割损失
+                        0.1 * errG_adv +          # λ_adv * L_adv（论文权重0.1）
+                        1.0 * fm_loss +           # λ_FM * L_FM（论文权重1.0）
+                        0.2 * loss_sor +         # λ_SOR * L_SOR（论文权重0.2）
+                        0.05 * loss_edge +        # 边界损失（辅助）
+                        cps_weight * loss_cps +   # CPS一致性损失（动态权重）
+                        0.05 * loss_scl +         # 语义对比损失（辅助）
+                        0.05 * loss_soft_pseudo   # 软伪标签损失（辅助）
                 )
 
-                loss = 2 * loss_l + loss_u
+                # 总损失：L_total = L_sup + L_u
+                # 其中L_sup包含监督损失和边界损失，L_u包含所有无标注损失组件
+                loss = loss_l + loss_u
                 loss.mean().backward()
                 optim.step()
+                if not args.no_scd and optim_adapter is not None:
+                    optim_adapter.step()
 
             adjust_lr_rate(optim, itr, total_batch)
         model.eval()

@@ -145,16 +145,44 @@ import torch
 import torch.nn.functional as F
 
 
+def get_boundary_sobel(mask):
+    """
+    使用Sobel算子提取边界图（论文第3.2节，公式(9)）
+    
+    论文描述：通过Sobel梯度算子G_x和G_y在水平和垂直方向计算边界图
+    公式：B = sqrt((G_x * P_u)^2 + (G_y * P_u)^2)
+    
+    参数:
+        mask: [B, 1, H, W] 或 [B, H, W] - 分割掩码或预测概率图
+    返回:
+        boundary: [B, 1, H, W] - Sobel算子提取的边界图
+    """
+    if len(mask.shape) == 3:
+        mask = mask.unsqueeze(1)
+    
+    # Sobel算子：水平和垂直方向的梯度算子（论文公式(9)）
+    sobel_x = torch.tensor([[[-1, 0, 1], 
+                             [-2, 0, 2], 
+                             [-1, 0, 1]]], 
+                           dtype=torch.float32, device=mask.device).unsqueeze(0)
+    sobel_y = torch.tensor([[[-1, -2, -1], 
+                             [0, 0, 0], 
+                             [1, 2, 1]]], 
+                           dtype=torch.float32, device=mask.device).unsqueeze(0)
+    
+    # 计算水平和垂直方向的梯度：G_x * P_u 和 G_y * P_u
+    grad_x = F.conv2d(mask, sobel_x, padding=1)
+    grad_y = F.conv2d(mask, sobel_y, padding=1)
+    
+    # 计算边界图：B = sqrt(G_x^2 + G_y^2)（论文公式(9)）
+    boundary = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6)
+    return boundary
+
+
 def get_boundary(mask):
     # mask: [B, 1, H, W]
-    laplace_kernel = torch.tensor([[0, 1, 0],
-                                   [1, -4, 1],
-                                   [0, 1, 0]],
-                                  dtype=torch.float32, device=mask.device).unsqueeze(0).unsqueeze(0)
-    edge = F.conv2d(mask, laplace_kernel, padding=1)
-    edge = edge.abs()
-    edge = (edge > 0).float()
-    return edge
+    # Keep this for backward compatibility, but use Sobel for SOR
+    return get_boundary_sobel(mask)
 
 
 def boundary_iou_loss(pred, target):
