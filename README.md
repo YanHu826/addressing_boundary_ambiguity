@@ -466,19 +466,6 @@ A:
 3. Add new option to `--dataset` parameter in `opt.py`
 4. Prepare data split files in `airs/data/splits/`
 
-## Citation
-
-If you use this code, please cite our paper:
-
-```bibtex
-@article{scra2025,
-  title={Addressing Boundary Ambiguity in Semi-Supervised Ultrasound Segmentation via Structure-Consistent Representation Alignment},
-  author={Hu, Yan and Yin, Ming and Abdelsamea, Mohammed M. and Zhang, Lei and Liu, Lu and Ye, Xujiong and Fu, Zeyu},
-  journal={Neurocomputing},
-  year={2025}
-}
-```
-
 ## License
 
 This project is licensed under the [LICENSE](LICENSE) file.
