@@ -1,0 +1,40 @@
+\documentclass{letter}
+\usepackage{url}
+\usepackage[a4paper,margin=1in]{geometry}
+
+\signature{Yan Hu\\First Author\\
+Department of Computer Science\\
+University of Exeter\\
+Exeter, UK\\
+Email: yh657@exeter.ac.uk\\[0.5em]
+\textit{Corresponding author:} Zeyu Fu\\
+Email: z.fu@exeter.ac.uk}
+
+\address{Department of Computer Science\\
+University of Exeter\\
+Exeter, UK}
+
+\begin{document}
+
+\begin{letter}{Editor-in-Chief\\
+Knowledge-Based Systems}
+
+\opening{Dear Editor,}
+
+We are pleased to submit our manuscript entitled ``BRACE: A Boundary-Reliability Knowledge Alignment Framework for Semi-Supervised Ultrasound Segmentation'' for consideration in \textit{Knowledge-Based Systems}.
+
+The manuscript is aligned with the scope of \textit{Knowledge-Based Systems} because it formulates semi-supervised ultrasound segmentation as a problem of knowledge representation, alignment, and transfer rather than as a purely pixel-level consistency task. BRACE represents structural boundary knowledge with feature-boundary pairs, models pseudo-label reliability through entropy-derived confidence, and complements this reliability signal with boundary calibration and main-auxiliary decoder agreement during training.
+
+The technical contribution consists of three coupled modules. Feature-Boundary Wasserstein Alignment (FBWA) aligns labeled and unlabeled feature-boundary representations with a Wasserstein-style critic regularized by gradient penalty. Structure-Oriented Residual Perturbation (SORP) constructs an auxiliary perturbation view to expose structure-sensitive feature variations. Reliability-Calibrated Co-teaching (RCT) uses entropy-derived reliability to weight pseudo-label supervision while applying boundary calibration and main-auxiliary co-teaching as complementary training terms.
+
+The empirical section reports experiments on BUSI, TN3K, PSFHS, and HC18 under the reference protocols used by Shape Prior for BUSI/TN3K and BiPCC for PSFHS/HC18. The manuscript includes main comparisons, component analyses, sensitivity analyses, qualitative examples, and limitation analysis under these protocol-aligned settings. We believe this protocol-grounded evaluation strengthens the submission by connecting the methodological contribution to established semi-supervised ultrasound benchmarks.
+
+We confirm that this manuscript has not been published elsewhere and is not currently under consideration for publication in any other journal. All authors have read and approved the manuscript, and there are no conflicts of interest to declare. The code is available at \url{https://github.com/YanHu826/addressing_boundary_ambiguity}.
+
+Please note that all correspondence regarding this manuscript should be directed to the corresponding author, Dr. Zeyu Fu (z.fu@exeter.ac.uk).
+
+\closing{Sincerely,}
+
+\end{letter}
+
+\end{document}

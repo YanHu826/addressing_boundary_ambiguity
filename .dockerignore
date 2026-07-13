@@ -1,0 +1,11 @@
+.git
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+airs/semi/checkpoint
+outputs
+runtime
+DATA

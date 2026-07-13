@@ -1,0 +1,4 @@
+BRACE aligns boundary and reliability knowledge for ultrasound segmentation.
+FBWA matches feature-boundary representations with Wasserstein alignment.
+SORP and RCT improve pseudo-label transfer under scarce annotations.
+Experiments follow Shape Prior and BiPCC ultrasound benchmark protocols.

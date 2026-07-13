@@ -1,0 +1,14 @@
+tag=brace_paper_freshgan5000_infra8_06161206b
+run_root=<project-root>/outputs/paper_runs/brace_paper_freshgan5000_infra8_06161206b
+start_time=2026-06-16 12:14:05 CST
+code=3a3f1ca exp: train paper GAN critics to epoch 5000
+branch=paper-run-snapshot
+common_args=--use_strong_aug --use_bcp --wsdice_mode adaptive
+semi_seed=3407
+semi_batch_size=16
+semi_num_workers=6
+semi_lr=1e-4
+gan_niter=5001
+gan_expected_epoch=5000
+gan_resume_from_latest=0
+phase_order=8way_exp1_exp2_all_datasets -> BUSI/TN3K_exp3

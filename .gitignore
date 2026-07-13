@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.job_state/
+outputs/
+result/
+runtime/
+.idea/
+.DS_Store
+*.log
+*.zip
+nohup.out
+
+airs/semi/code/pretrain/backbone/*.pth
